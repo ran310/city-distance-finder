@@ -28,6 +28,16 @@ CITIES_TABLE_FQN = "iceberg_catalog.liewyousheng_geolocation.cities"
 
 # --- S3 access to Iceberg data files (avoid HTTP 403 on the warehouse bucket) ---
 #
+# On EC2, the app runs under systemd (often as root) with no ~/.aws profile. The Iceberg REST
+# login (ICEBERG_USER/PASSWORD) does not grant S3 access — DuckDB must sign S3 requests using
+# the instance IAM role or explicit keys. With no static keys below, the app now always uses
+# DuckDB's credential_chain (instance metadata, env vars, etc.). Ensure the instance role can
+# s3:GetObject (and ListBucket as needed) on the warehouse bucket/prefix, and set region:
+#
+# S3_REGION = "us-east-1"
+# Optional: tune provider order (defaults work on many hosts; add `instance` if needed for IMDS):
+# S3_CREDENTIAL_CHAIN = "env;instance;config;process"
+#
 # Option A — Use your normal AWS CLI session (`aws login`, `aws sso login`, profiles, env).
 # 1) Set the flag below to True
 # 2) In the same shell you use to start Python: run `aws login` / `aws sso login`, set

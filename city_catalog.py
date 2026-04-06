@@ -59,12 +59,13 @@ def _apply_s3_credential_chain(con: duckdb.DuckDBPyConnection, cfg) -> None:
         "TYPE s3,",
         "PROVIDER credential_chain",
     ]
-    chain = getattr(cfg, "S3_CREDENTIAL_CHAIN", None) or "env;sso;config;process"
+    chain = getattr(cfg, "S3_CREDENTIAL_CHAIN", None) or "env;instance;sso;config;process"
     parts.append(f", CHAIN '{_sql_string_literal(str(chain))}'")
     region = (
         getattr(cfg, "S3_REGION", None)
         or os.environ.get("AWS_DEFAULT_REGION")
         or os.environ.get("AWS_REGION")
+        or "us-east-1"
     )
     if region:
         parts.append(f", REGION '{_sql_string_literal(str(region))}'")
@@ -181,7 +182,10 @@ def _apply_s3_secret(con: duckdb.DuckDBPyConnection, cfg) -> None:
         _apply_s3_static_secret(con, key, secret, token, region)
         return
 
-    if use_chain:
+    # Without static keys, always register credential_chain (EC2 instance role, env, etc.).
+    # Previously only `S3_USE_AWS_CREDENTIAL_CHAIN = True` did this, which broke deploys where
+    # appconfig omitted the flag — Iceberg REST worked but warehouse S3 GETs returned 403.
+    if use_chain or force_chain or not (key and secret):
         _apply_s3_credential_chain(con, cfg)
 
 
