@@ -1,0 +1,198 @@
+name: Deploy to AWS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  EC2_STACK_NAME: ${{ vars.AWS_EC2_STACK_NAME || 'AwsInfra-Ec2Nginx' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate appconfig.py for the bundle (credentials from EC2 env file)
+        env:
+          ICEBERG_CATALOG_ENDPOINT: ${{ vars.ICEBERG_CATALOG_ENDPOINT }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          src = Path("appconfig.example.py").read_text()
+          src = re.sub(r"^ICEBERG_USER = .*", 'ICEBERG_USER = ""', src, flags=re.M)
+          src = re.sub(r"^ICEBERG_PASSWORD = .*", 'ICEBERG_PASSWORD = ""', src, flags=re.M)
+          ep = os.environ.get("ICEBERG_CATALOG_ENDPOINT", "").strip()
+          if ep:
+              line = "ICEBERG_CATALOG_ENDPOINT = " + repr(ep)
+              src = re.sub(r"^ICEBERG_CATALOG_ENDPOINT = .*", line, src, count=1, flags=re.M)
+          Path("appconfig.py").write_text(src)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend (nginx path prefix)
+        env:
+          VITE_BASE_PATH: /city-distance-finder/
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Write deploy/runtime-secrets.env (GitHub Secrets → EC2 systemd EnvironmentFile)
+        env:
+          ICEBERG_USER: ${{ secrets.ICEBERG_USER }}
+          ICEBERG_PASSWORD: ${{ secrets.ICEBERG_PASSWORD }}
+        run: |
+          mkdir -p deploy
+          umask 077
+          {
+            echo "ICEBERG_USER=${ICEBERG_USER}"
+            echo "ICEBERG_PASSWORD=${ICEBERG_PASSWORD}"
+          } > deploy/runtime-secrets.env
+
+      - name: Make CodeDeploy hook scripts executable
+        run: chmod +x deploy/*.sh
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve stack outputs
+        id: stack
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "${EC2_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='Ec2NginxArtifactBucketName'].OutputValue" \
+            --output text)
+          APP=$(aws cloudformation describe-stacks \
+            --stack-name "${EC2_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='CodeDeployAppName'].OutputValue" \
+            --output text)
+          DG=$(aws cloudformation describe-stacks \
+            --stack-name "${EC2_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='CodeDeployDeploymentGroupNameCityDistanceFinder'].OutputValue" \
+            --output text)
+          if [[ -z "$BUCKET" || "$BUCKET" == "None" ]]; then
+            echo "::error::Missing Ec2NginxArtifactBucketName on stack ${EC2_STACK_NAME}"
+            exit 1
+          fi
+          if [[ -z "$APP" || "$APP" == "None" || -z "$DG" || "$DG" == "None" ]]; then
+            echo "::error::Missing CodeDeploy outputs (CodeDeployAppName / CodeDeployDeploymentGroupNameCityDistanceFinder). Deploy the updated aws-infra EC2 stack first."
+            exit 1
+          fi
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "app=${APP}"       >> "$GITHUB_OUTPUT"
+          echo "dg=${DG}"         >> "$GITHUB_OUTPUT"
+
+      - name: Create deployment bundle (zip)
+        run: |
+          zip -r /tmp/city-distance-finder.zip . \
+            -x '*/.git/*' \
+            -x '.git/*' \
+            -x 'frontend/node_modules/*' \
+            -x 'frontend/node_modules/**' \
+            -x '*__pycache__/*' \
+            -x '*.pyc' \
+            -x '.venv/*' \
+            -x 'venv/*'
+          echo "Bundle size: $(du -sh /tmp/city-distance-finder.zip | cut -f1)"
+
+      - name: Upload bundle to S3
+        id: upload
+        env:
+          BUCKET: ${{ steps.stack.outputs.bucket }}
+        run: |
+          KEY="city-distance-finder/releases/${GITHUB_SHA}.zip"
+          aws s3 cp /tmp/city-distance-finder.zip "s3://${BUCKET}/${KEY}"
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until CodeDeploy deployment group is idle
+        env:
+          APP: ${{ steps.stack.outputs.app }}
+          DG: ${{ steps.stack.outputs.dg }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 3600))
+          while (( SECONDS < deadline )); do
+            if ! ids=$(aws deploy list-deployments \
+              --application-name "${APP}" \
+              --deployment-group-name "${DG}" \
+              --include-only-statuses Created Queued InProgress Ready \
+              --query 'deployments' \
+              --output text 2>cd-list.err); then
+              echo "list-deployments failed (see stderr). Add codedeploy:ListDeployments to OIDC role."
+              sed 's/^/  /' cd-list.err >&2 || true
+              sleep 20
+              continue
+            fi
+            rm -f cd-list.err
+            if [[ -z "${ids}" || "${ids}" == "None" ]]; then
+              echo "CodeDeploy deployment group is idle."
+              exit 0
+            fi
+            echo "Active deployment ID(s): ${ids} — waiting 20s…"
+            sleep 20
+          done
+          echo "Timed out after 1h." >&2
+          exit 1
+
+      - name: Create CodeDeploy deployment
+        id: deploy
+        env:
+          BUCKET: ${{ steps.stack.outputs.bucket }}
+          S3_KEY: ${{ steps.upload.outputs.key }}
+          APP: ${{ steps.stack.outputs.app }}
+          DG: ${{ steps.stack.outputs.dg }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_ID=""
+          for attempt in $(seq 1 30); do
+            if DEPLOYMENT_ID=$(aws deploy create-deployment \
+              --application-name "${APP}" \
+              --deployment-group-name "${DG}" \
+              --s3-location "bucket=${BUCKET},key=${S3_KEY},bundleType=zip" \
+              --description "city-distance-finder sha=${GITHUB_SHA} ref=${GITHUB_REF_NAME}" \
+              --query 'deploymentId' \
+              --output text 2>cd.err); then
+              rm -f cd.err
+              break
+            fi
+            if grep -qF 'DeploymentLimitExceeded' cd.err 2>/dev/null; then
+              echo "DeploymentLimitExceeded; retry ${attempt}/30 in 25s…"
+              sleep 25
+              continue
+            fi
+            cat cd.err >&2
+            exit 1
+          done
+          if [[ -z "${DEPLOYMENT_ID}" || "${DEPLOYMENT_ID}" == "None" ]]; then
+            echo "Failed to create deployment after retries." >&2
+            exit 1
+          fi
+          echo "deployment_id=${DEPLOYMENT_ID}" >> "$GITHUB_OUTPUT"
+          echo "Created deployment: ${DEPLOYMENT_ID}"
+
+      - name: Wait for deployment to succeed
+        env:
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+        run: |
+          echo "Waiting for ${DEPLOYMENT_ID}…"
+          aws deploy wait deployment-successful \
+            --deployment-id "${DEPLOYMENT_ID}"
+          echo "Deployment succeeded!"
