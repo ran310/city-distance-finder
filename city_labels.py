@@ -26,31 +26,20 @@ def assign_labels(rows: list[dict]) -> list[dict]:
     if not rows:
         return []
 
-    # Stable order
-    def sort_key(r):
-        return (
-            _norm(r.get("country")),
-            _norm(r.get("city")),
-            _norm(r.get("state")),
-            str(r.get("id", "")),
-        )
-
-    ordered = sorted(rows, key=sort_key)
-
     # Count (city, country) pairs — multiple ⇒ same name in different states (or duplicates).
     cc_counts: dict[tuple[str, str], int] = {}
-    for r in ordered:
+    for r in rows:
         k = (_norm(r.get("city")), _norm(r.get("country")))
         cc_counts[k] = cc_counts.get(k, 0) + 1
 
     # Same city name anywhere in this result (e.g. "Athens" US + "Athens" Greece).
     name_counts: dict[str, int] = {}
-    for r in ordered:
+    for r in rows:
         n = _norm(r.get("city"))
         name_counts[n] = name_counts.get(n, 0) + 1
 
     provisional: list[tuple[dict, str]] = []
-    for r in ordered:
+    for r in rows:
         city = (r.get("city") or "").strip() or "?"
         country = (r.get("country") or "").strip() or "?"
         state = r.get("state")
@@ -63,25 +52,18 @@ def assign_labels(rows: list[dict]) -> list[dict]:
             label = f"{city}, {country}"
         provisional.append((r, label))
 
-    # Numeric prefix for duplicate provisional labels
-    from collections import defaultdict
-
-    buckets: dict[str, list[tuple[dict, str]]] = defaultdict(list)
-    for r, label in provisional:
-        buckets[label].append((r, label))
-
+    # Numeric prefix for duplicate provisional labels (while preserving input order).
+    label_totals: dict[str, int] = {}
+    for _, label in provisional:
+        label_totals[label] = label_totals.get(label, 0) + 1
+    label_seen: dict[str, int] = {}
     out: list[dict] = []
-    for label in sorted(buckets.keys()):
-        bucket = buckets[label]
-        if len(bucket) == 1:
-            r, _ = bucket[0]
+    for r, label in provisional:
+        total = label_totals[label]
+        if total == 1:
             row = {**r, "label": label}
             out.append(row)
         else:
-            bucket_sorted = sorted(bucket, key=lambda x: str(x[0].get("id", "")))
-            for i, (r, base) in enumerate(bucket_sorted, start=1):
-                out.append({**r, "label": f"{i}. {base}"})
-
-    # Restore search-friendly order (still sorted by country, city)
-    out.sort(key=lambda x: (x["label"].lower()))
+            label_seen[label] = label_seen.get(label, 0) + 1
+            out.append({**r, "label": f"{label_seen[label]}. {label}"})
     return out

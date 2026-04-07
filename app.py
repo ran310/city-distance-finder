@@ -130,6 +130,9 @@ def cities():
         state_or = ""
 
     pattern = f"%{q}%"
+    exact = q
+    prefix = f"{q}%"
+    token = f"% {q}%"
     sql = f"""
         SELECT
             CAST({c_id} AS VARCHAR) AS id,
@@ -142,12 +145,33 @@ def cities():
         WHERE
             {c_city} ILIKE $pattern
             OR {c_country} ILIKE $pattern{state_or}
+        ORDER BY
+            CASE
+                WHEN {c_city} ILIKE $exact THEN 0
+                WHEN {c_city} ILIKE $prefix THEN 1
+                WHEN {c_city} ILIKE $token THEN 2
+                WHEN {c_country} ILIKE $exact THEN 3
+                {f"WHEN {c_state} ILIKE $exact THEN 4" if state_col else ""}
+                ELSE 5
+            END,
+            LENGTH(CAST({c_city} AS VARCHAR)),
+            CAST({c_city} AS VARCHAR),
+            CAST({c_country} AS VARCHAR)
         LIMIT $lim
     """
 
     try:
         with _db_lock:
-            cur = con.execute(sql, {"pattern": pattern, "lim": limit})
+            cur = con.execute(
+                sql,
+                {
+                    "pattern": pattern,
+                    "exact": exact,
+                    "prefix": prefix,
+                    "token": token,
+                    "lim": limit,
+                },
+            )
             desc = [x[0] for x in cur.description]
             raw = [dict(zip(desc, row)) for row in cur.fetchall()]
     except Exception as e:
@@ -162,9 +186,30 @@ def cities():
 def spa(path):
     if path.startswith("api/"):
         return jsonify({"error": "Not found"}), 404
-    file_path = _FRONTEND_DIST / path
-    if path and file_path.is_file():
-        return send_from_directory(_FRONTEND_DIST, path)
+    normalized = path.lstrip("/")
+    candidates = [normalized]
+
+    root_prefix = (os.environ.get("APPLICATION_ROOT") or "").strip().strip("/")
+    if root_prefix:
+        pref = f"{root_prefix}/"
+        if normalized == root_prefix:
+            candidates.append("")
+        elif normalized.startswith(pref):
+            candidates.append(normalized[len(pref) :])
+
+    # Local dev can still open a prefixed build (/city-distance-finder/...) even when
+    # APPLICATION_ROOT is not exported; try stripping the first URL segment as fallback.
+    if "/" in normalized:
+        candidates.append(normalized.split("/", 1)[1])
+
+    seen = set()
+    for rel in candidates:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        file_path = _FRONTEND_DIST / rel
+        if rel and file_path.is_file():
+            return send_from_directory(_FRONTEND_DIST, rel)
     index = _FRONTEND_DIST / "index.html"
     if index.is_file():
         return send_from_directory(_FRONTEND_DIST, "index.html")

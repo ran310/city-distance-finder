@@ -98,7 +98,9 @@ export function CityPicker({ label, value, onChange }: Props) {
           {loading && <li className="dropdown-meta">Searching…</li>}
           {err && <li className="dropdown-error">{err}</li>}
           {!loading && !err && items.length === 0 && (
-            <li className="dropdown-meta">No matches</li>
+            <li className="dropdown-meta">
+              {`No matches for "${q.trim()}". Try a broader term (for example: "Paris", "France"), check spelling, or verify backend catalog access if this should exist.`}
+            </li>
           )}
           {items.map((c) => (
             <li key={c.id + c.label}>
