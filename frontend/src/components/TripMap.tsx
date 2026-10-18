@@ -18,8 +18,12 @@ import {
 } from "../geo";
 import type { City } from "../types";
 
+// CARTO basemap key (browser-side by design; restrict it to this domain in the CARTO dashboard).
+const cartoKey = (import.meta.env.VITE_CARTO_API_KEY ?? "").trim();
+if (!cartoKey) console.warn("VITE_CARTO_API_KEY is not set; CARTO tiles will show 'API KEY REQUIRED'.");
 const cartoDark =
-  "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+  "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" +
+  (cartoKey ? `?key=${encodeURIComponent(cartoKey)}` : "");
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));

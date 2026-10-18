@@ -47,7 +47,12 @@ jobs:
       - name: Build frontend (nginx path prefix)
         env:
           VITE_BASE_PATH: /city-distance-finder/
+          VITE_CARTO_API_KEY: ${{ secrets.CARTO_API_KEY }}
         run: |
+          if [[ -z "${VITE_CARTO_API_KEY}" ]]; then
+            echo "::error::Missing repository secret CARTO_API_KEY (map tiles would show 'API KEY REQUIRED')."
+            exit 1
+          fi
           cd frontend
           npm ci
           npm run build

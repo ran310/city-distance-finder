@@ -7,3 +7,8 @@ venv/
 deploy/runtime-secrets.env
 .flask-app.pid
 .flask-app.log
+
+# Local env files with secrets (e.g. frontend/.env.local holding VITE_CARTO_API_KEY)
+.env.*
+!.env.example
+frontend/dist/
