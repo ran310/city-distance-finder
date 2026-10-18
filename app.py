@@ -96,7 +96,7 @@ def distance():
 
 
 @app.route("/api/cities")
-def cities():
+def search_cities():
     q = (request.args.get("q") or "").strip()
     if len(q) < 1:
         return jsonify({"cities": []})
